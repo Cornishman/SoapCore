@@ -27,6 +27,7 @@ namespace SoapCore.ServiceModel
 
 			IsMessageContractResponse = returnType.CustomAttributes
 					 .FirstOrDefault(ca => ca.AttributeType == typeof(MessageContractAttribute)) != null;
+			IsResponseWrapped = !IsMessageContractResponse || returnType.GetCustomAttribute<MessageContractAttribute>().IsWrapped;
 
 			AllParameters = operationMethod.GetParameters()
 				.Select((info, index) => CreateParameterInfo(info, index, contract))
@@ -44,6 +45,7 @@ namespace SoapCore.ServiceModel
 					.CustomAttributes
 					.FirstOrDefault(ca =>
 						ca.AttributeType == typeof(MessageContractAttribute)) != null;
+			IsRequestWrapped = !IsMessageContractRequest || InParameters.Single().Parameter.ParameterType.GetCustomAttribute<MessageContractAttribute>().IsWrapped;
 
 			var elementAttribute = operationMethod.ReturnParameter.GetCustomAttribute<XmlElementAttribute>();
 			ReturnName = operationMethod.ReturnParameter.GetCustomAttribute<MessageParameterAttribute>()?.Name ?? Name + "Result";
@@ -66,7 +68,9 @@ namespace SoapCore.ServiceModel
 		public MethodInfo DispatchMethod { get; private set; }
 		public bool IsOneWay { get; private set; }
 		public bool IsMessageContractResponse { get; private set; }
+		public bool IsResponseWrapped { get; private set; }
 		public bool IsMessageContractRequest { get; private set; }
+		public bool IsRequestWrapped { get; private set; }
 		public SoapMethodParameterInfo[] AllParameters { get; private set; }
 		public SoapMethodParameterInfo[] InParameters { get; private set; }
 		public SoapMethodParameterInfo[] OutParameters { get; private set; }

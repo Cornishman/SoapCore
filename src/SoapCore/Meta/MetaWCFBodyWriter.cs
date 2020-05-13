@@ -140,6 +140,12 @@ namespace SoapCore.Meta
 				return dataContractAttribute.Namespace;
 			}
 
+			var messageContractAttribute = type.GetCustomAttribute<MessageContractAttribute>();
+			if (!string.IsNullOrWhiteSpace(messageContractAttribute?.WrapperNamespace))
+			{
+				return messageContractAttribute.WrapperNamespace;
+			}
+
 			return GetModelNamespace(type.Namespace);
 		}
 
@@ -175,6 +181,9 @@ namespace SoapCore.Meta
 				var parameterName = !string.IsNullOrEmpty(elementAttribute?.ElementName)
 										? elementAttribute.ElementName
 										: parameterInfo.Parameter.GetCustomAttribute<MessageParameterAttribute>()?.Name ?? parameterInfo.Parameter.Name;
+
+				parameterName = GetMessageContractName(parameterInfo.Parameter.ParameterType, parameterName);
+
 				AddSchemaType(writer, parameterInfo.Parameter.ParameterType, parameterName, objectNamespace: elementAttribute?.Namespace ?? (parameterInfo.Namespace != "http://tempuri.org/" ? parameterInfo.Namespace : null));
 			}
 		}
@@ -235,7 +244,9 @@ namespace SoapCore.Meta
 				}
 			}
 
-			var groupedByNamespace = _complexTypeToBuild.GroupBy(x => x.Value).ToDictionary(x => x.Key, x => x.Select(k => k.Key));
+			var groupedByNamespace = _complexTypeToBuild
+				.Where(cttb => !cttb.Key.CustomAttributes.Any(attr => attr.AttributeType == typeof(MessageContractAttribute))) // Ignore types marked as a message contract
+				.GroupBy(x => x.Value).ToDictionary(x => x.Key, x => x.Select(k => k.Key));
 
 			foreach (var @namespace in groupedByNamespace.Keys.Where(x => x != null && x != _service.ServiceType.Namespace).Distinct())
 			{
@@ -246,41 +257,47 @@ namespace SoapCore.Meta
 
 			foreach (var operation in _service.Operations)
 			{
-				// input parameters of operation
-				writer.WriteStartElement("xs", "element", Namespaces.XMLNS_XSD);
-				writer.WriteAttributeString("name", operation.Name);
-				writer.WriteStartElement("xs", "complexType", Namespaces.XMLNS_XSD);
-				writer.WriteStartElement("xs", "sequence", Namespaces.XMLNS_XSD);
-
-				WriteParameters(writer, operation.InParameters);
-
-				writer.WriteEndElement(); // xs:sequence
-				writer.WriteEndElement(); // xs:complexType
-				writer.WriteEndElement(); // xs:element
-
-				// output parameter / return of operation
-				writer.WriteStartElement("xs", "element", Namespaces.XMLNS_XSD);
-				writer.WriteAttributeString("name", operation.Name + "Response");
-				writer.WriteStartElement("xs", "complexType", Namespaces.XMLNS_XSD);
-				writer.WriteStartElement("xs", "sequence", Namespaces.XMLNS_XSD);
-
-				if (operation.DispatchMethod.ReturnType != typeof(void) && operation.DispatchMethod.ReturnType != typeof(Task))
+				if (operation.IsRequestWrapped)
 				{
-					var returnType = operation.DispatchMethod.ReturnType;
-					if (returnType.IsConstructedGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>))
-					{
-						returnType = returnType.GetGenericArguments().First();
-					}
+					// input parameters of operation
+					writer.WriteStartElement("xs", "element", Namespaces.XMLNS_XSD);
+					writer.WriteAttributeString("name", operation.Name);
+					writer.WriteStartElement("xs", "complexType", Namespaces.XMLNS_XSD);
+					writer.WriteStartElement("xs", "sequence", Namespaces.XMLNS_XSD);
 
-					var returnName = operation.DispatchMethod.ReturnParameter.GetCustomAttribute<MessageParameterAttribute>()?.Name ?? operation.Name + "Result";
-					AddSchemaType(writer, returnType, returnName, false, GetDataContractNamespace(returnType));
+					WriteParameters(writer, operation.InParameters);
+
+					writer.WriteEndElement(); // xs:sequence
+					writer.WriteEndElement(); // xs:complexType
+					writer.WriteEndElement(); // xs:element
 				}
 
-				WriteParameters(writer, operation.OutParameters);
+				if (operation.IsResponseWrapped)
+				{
+					// output parameter / return of operation
+					writer.WriteStartElement("xs", "element", Namespaces.XMLNS_XSD);
+					writer.WriteAttributeString("name", operation.Name + "Response");
+					writer.WriteStartElement("xs", "complexType", Namespaces.XMLNS_XSD);
+					writer.WriteStartElement("xs", "sequence", Namespaces.XMLNS_XSD);
 
-				writer.WriteEndElement(); // xs:sequence
-				writer.WriteEndElement(); // xs:complexType
-				writer.WriteEndElement(); // xs:element
+					if (operation.DispatchMethod.ReturnType != typeof(void) && operation.DispatchMethod.ReturnType != typeof(Task))
+					{
+						var returnType = operation.DispatchMethod.ReturnType;
+						if (returnType.IsConstructedGenericType && returnType.GetGenericTypeDefinition() == typeof(Task<>))
+						{
+							returnType = returnType.GetGenericArguments().First();
+						}
+
+						var returnName = operation.DispatchMethod.ReturnParameter.GetCustomAttribute<MessageParameterAttribute>()?.Name ?? operation.Name + "Result";
+						AddSchemaType(writer, returnType, returnName, false, GetDataContractNamespace(returnType));
+					}
+
+					WriteParameters(writer, operation.OutParameters);
+
+					writer.WriteEndElement(); // xs:sequence
+					writer.WriteEndElement(); // xs:complexType
+					writer.WriteEndElement(); // xs:element
+				}
 
 				AddFaultTypes(writer, operation);
 			}
@@ -787,7 +804,7 @@ namespace SoapCore.Meta
 			{
 				var properties = type.GetProperties().Where(prop =>
 					prop.DeclaringType == type &&
-					prop.CustomAttributes.All(attr => attr.AttributeType.Name != "IgnoreDataMemberAttribute"));
+					prop.CustomAttributes.All(attr => attr.AttributeType != typeof(IgnoreDataMemberAttribute) && attr.AttributeType != typeof(MessageHeaderAttribute)));
 
 				var dataMembersToWrite = new List<DataMemberDescription>();
 
@@ -796,24 +813,33 @@ namespace SoapCore.Meta
 				foreach (var property in properties)
 				{
 					var propertyName = property.Name;
-
-					var attributes = property.GetCustomAttributes(true);
 					int order = 0;
-					foreach (var attr in attributes)
+
+					var dataMemberAttribute = property.GetCustomAttribute<DataMemberAttribute>();
+					if (dataMemberAttribute != null)
 					{
-						if (attr is DataMemberAttribute dataContractAttribute)
+						if (dataMemberAttribute.IsNameSetExplicitly)
 						{
-							if (dataContractAttribute.IsNameSetExplicitly)
-							{
-								propertyName = dataContractAttribute.Name;
-							}
+							propertyName = dataMemberAttribute.Name;
+						}
 
-							if (dataContractAttribute.Order > 0)
-							{
-								order = dataContractAttribute.Order;
-							}
+						if (dataMemberAttribute.Order > 0)
+						{
+							order = dataMemberAttribute.Order;
+						}
+					}
 
-							break;
+					var messageBodyMemberAttribute = property.GetCustomAttribute<MessageBodyMemberAttribute>();
+					if (messageBodyMemberAttribute != null)
+					{
+						if (!string.IsNullOrWhiteSpace(messageBodyMemberAttribute.Name))
+						{
+							propertyName = messageBodyMemberAttribute.Name;
+						}
+
+						if (messageBodyMemberAttribute.Order > -1)
+						{
+							order = dataMemberAttribute.Order;
 						}
 					}
 
@@ -853,21 +879,113 @@ namespace SoapCore.Meta
 				writer.WriteAttributeString("name", $"{BindingType}_{operation.Name}_InputMessage");
 				writer.WriteStartElement("wsdl", "part", Namespaces.WSDL_NS);
 				writer.WriteAttributeString("name", "parameters");
-				writer.WriteAttributeString("element", "tns:" + operation.Name);
+				var requestMessageContractType = operation.IsMessageContractRequest
+					? operation.InParameters.SingleOrDefault(HasMessageContractAttribute)?.Parameter.ParameterType
+					: null;
+
+				if (operation.IsMessageContractRequest && !operation.IsRequestWrapped)
+				{
+					writer.WriteAttributeString("element", $"tns:{GetTypeName(operation.InParameters.SingleOrDefault().Parameter.ParameterType)}");
+				}
+				else
+				{
+					writer.WriteAttributeString("element", $"tns:{operation.Name}");
+				}
+
 				writer.WriteEndElement(); // wsdl:part
 				writer.WriteEndElement(); // wsdl:message
+
+				// request message header support
+				WriteMessageHeaders(writer, requestMessageContractType, $"{BindingType}_{operation.Name}");
 
 				// output
 				writer.WriteStartElement("wsdl", "message", Namespaces.WSDL_NS);
 				writer.WriteAttributeString("name", $"{BindingType}_{operation.Name}_OutputMessage");
 				writer.WriteStartElement("wsdl", "part", Namespaces.WSDL_NS);
 				writer.WriteAttributeString("name", "parameters");
-				writer.WriteAttributeString("element", "tns:" + operation.Name + "Response");
+				var responseMessageContractType = operation.IsMessageContractResponse
+					? operation.DispatchMethod.ReturnType
+					: null;
+
+				if (operation.IsMessageContractResponse && !operation.IsResponseWrapped)
+				{
+					writer.WriteAttributeString("element", $"tns:{GetTypeName(operation.DispatchMethod.ReturnType)}");
+				}
+				else
+				{
+					writer.WriteAttributeString("element", $"tns:{operation.Name}Response");
+				}
+
 				writer.WriteEndElement(); // wsdl:part
 				writer.WriteEndElement(); // wsdl:message
 
+				// response message header support
+				WriteMessageHeaders(writer, responseMessageContractType, $"{BindingType}_{operation.Name}Response");
+
 				AddMessageFaults(writer, operation);
 			}
+		}
+
+		private string GetMessageContractWrapperName(Type type)
+		{
+			var messageContractAttribute = type?.GetCustomAttribute<MessageContractAttribute>();
+			if (messageContractAttribute?.IsWrapped == true
+				&& !string.IsNullOrWhiteSpace(messageContractAttribute?.WrapperName))
+			{
+				return messageContractAttribute.WrapperName;
+			}
+
+			return null;
+		}
+
+		private void WriteMessageHeaders(XmlDictionaryWriter writer, Type parameterType, string messageName)
+		{
+			var messageHeaders = parameterType?.GetProperties().Where(prop => prop.CustomAttributes.Any(attr => attr.AttributeType == typeof(MessageHeaderAttribute)));
+
+			if (messageHeaders?.Any() == true)
+			{
+				writer.WriteStartElement("wsdl", "message", Namespaces.WSDL_NS);
+				writer.WriteAttributeString("name", $"{messageName}_Headers");
+
+				foreach (var messageHeader in messageHeaders)
+				{
+					writer.WriteStartElement("wsdl", "part", Namespaces.WSDL_NS);
+					writer.WriteAttributeString("name", GetMessageHeaderName(messageHeader));
+
+					var ns = "tns";
+					var elementName = string.Empty;
+					var sysType = ResolveSystemType(messageHeader.PropertyType);
+					if (sysType.name != null)
+					{
+						elementName = sysType.name;
+						ns = "ser";
+						writer.WriteXmlnsAttribute("ser", Namespaces.SERIALIZATION_NS);
+					}
+					else
+					{
+						elementName = GetTypeName(messageHeader.PropertyType);
+
+						var headerNamespace = GetDataContractNamespace(messageHeader.PropertyType);
+						if (headerNamespace != TargetNameSpace)
+						{
+							ns = $"q{_namespaceCounter++}";
+							writer.WriteXmlnsAttribute(ns, headerNamespace);
+						}
+					}
+
+					writer.WriteAttributeString("element", $"{ns}:{elementName}");
+					writer.WriteEndElement(); // wsdl:part
+				}
+
+				writer.WriteEndElement(); // wsdl:message
+			}
+		}
+
+		private string GetMessageHeaderName(PropertyInfo messageHeader)
+		{
+			return !string.IsNullOrWhiteSpace(messageHeader.GetCustomAttribute<MessageHeaderAttribute>().Name)
+									? messageHeader.GetCustomAttribute<MessageHeaderAttribute>().Name
+									: messageHeader.Name;
 		}
 
 		private void AddMessageFaults(XmlDictionaryWriter writer, OperationDescription operation)
@@ -951,12 +1069,20 @@ namespace SoapCore.Meta
 				writer.WriteEndElement(); // soap:operation
 
 				writer.WriteStartElement("wsdl", "input", Namespaces.WSDL_NS);
+				var requestMessageContractType = operation.IsMessageContractRequest
+					? operation.InParameters.SingleOrDefault(HasMessageContractAttribute)?.Parameter.ParameterType
+					: null;
+				WriteBindingHeaders(writer, $"{BindingType}_{operation.Name}", requestMessageContractType);
 				writer.WriteStartElement("soap", "body", Namespaces.SOAP11_NS);
 				writer.WriteAttributeString("use", "literal");
 				writer.WriteEndElement(); // soap:body
 				writer.WriteEndElement(); // wsdl:input
 
 				writer.WriteStartElement("wsdl", "output", Namespaces.WSDL_NS);
+				var responseMessageContractType = operation.IsMessageContractResponse
+					? operation.DispatchMethod.ReturnType
+					: null;
+				WriteBindingHeaders(writer, $"{BindingType}_{operation.Name}Response", responseMessageContractType);
 				writer.WriteStartElement("soap", "body", Namespaces.SOAP11_NS);
 				writer.WriteAttributeString("use", "literal");
 				writer.WriteEndElement(); // soap:body
@@ -968,6 +1094,23 @@ namespace SoapCore.Meta
 			}
 
 			writer.WriteEndElement(); // wsdl:binding
+		}
+
+		private void WriteBindingHeaders(XmlDictionaryWriter writer, string message, Type paramaterType)
+		{
+			var messageHeaders = paramaterType?.GetProperties().Where(prop => prop.CustomAttributes.Any(attr => attr.AttributeType == typeof(MessageHeaderAttribute)));
+
+			if (messageHeaders?.Any() == true)
+			{
+				foreach (var messageHeader in messageHeaders)
+				{
+					writer.WriteStartElement("soap", "header", Namespaces.SOAP11_NS);
+					writer.WriteAttributeString("message", $"tns:{message}_Headers");
+					writer.WriteAttributeString("part", GetMessageHeaderName(messageHeader));
+					writer.WriteAttributeString("use", "literal");
+					writer.WriteEndElement(); // soap:header
+				}
+			}
 		}
 
 		private void AddBindingFaults(XmlDictionaryWriter writer, OperationDescription operation)
@@ -1192,7 +1335,7 @@ namespace SoapCore.Meta
 						writer.WriteAttributeString("name", name);
 						writer.WriteAttributeString("nillable", "true");
 						writer.WriteAttributeString("type", $"{ns}:ArrayOf{sysType.name}");
-						
+
 						_arrayToBuild.Enqueue(type);
 					}
 					else
@@ -1360,6 +1503,25 @@ namespace SoapCore.Meta
 			return type.Name;
 		}
 
+		private string GetMessageContractName(ICustomAttributeProvider attributeProvider, string name = null)
+		{
+			// Make use of MessageContract attribute, if set, as it may contain Wrapper Name override
+			var messageContractAttribute = attributeProvider.GetCustomAttributes(typeof(MessageContractAttribute), false).SingleOrDefault() as MessageContractAttribute;
+			if (!string.IsNullOrWhiteSpace(messageContractAttribute?.WrapperName))
+			{
+				return messageContractAttribute.WrapperName;
+			}
+
+			// Make use of MessageBodyMember attribute, if set, as it may contain a Name override
+			var messageBodyMemberAttribute = attributeProvider.GetCustomAttributes(typeof(MessageBodyMemberAttribute), false).SingleOrDefault() as MessageBodyMemberAttribute;
+			if (!string.IsNullOrWhiteSpace(messageBodyMemberAttribute?.Name))
+			{
+				return messageBodyMemberAttribute.Name;
+			}
+
+			return name;
+		}
+
 		private (string name, string ns) ResolveSystemType(Type type)
 		{
 			if (SysTypeDic.ContainsKey(type.FullName))
@@ -1377,6 +1539,11 @@ namespace SoapCore.Meta
 			var baseType = type.GetTypeInfo().BaseType;
 
 			return !isArrayType && !type.IsEnum && !type.IsPrimitive && !type.IsValueType && baseType != null && !baseType.Name.Equals("Object");
+		}
+
+		private bool HasMessageContractAttribute(SoapMethodParameterInfo soapMethodParameterInfo)
+		{
+			return soapMethodParameterInfo.Parameter.ParameterType.CustomAttributes.Any(attr => attr.AttributeType == typeof(MessageContractAttribute));
 		}
 	}
 }

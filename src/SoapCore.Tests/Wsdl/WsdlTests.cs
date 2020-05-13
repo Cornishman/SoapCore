@@ -17,14 +17,18 @@ using Shouldly;
 using SoapCore.MessageEncoder;
 using SoapCore.Meta;
 using SoapCore.ServiceModel;
+using SoapCore.Tests.Serialization.Models.Xml;
 using SoapCore.Tests.Wsdl.Services;
+using SoapCore.Tests.Wsdl.Services.MessageContracts;
 
 namespace SoapCore.Tests.Wsdl
 {
 	[TestClass]
 	public class WsdlTests
 	{
-		private readonly XNamespace _xmlSchema = "http://www.w3.org/2001/XMLSchema";
+		private readonly XNamespace _xmlSchema = Namespaces.XMLNS_XSD;
+		private readonly XNamespace _wsdlSchema = Namespaces.WSDL_NS;
+		private readonly XNamespace _soapSchema = Namespaces.SOAP11_NS;
 
 		private IWebHost _host;
 
@@ -203,6 +207,165 @@ namespace SoapCore.Tests.Wsdl
 
 			var myMyTypeElement = GetElements(myMyTypeList, _xmlSchema + "element").SingleOrDefault(a => a.Attribute("name")?.Value.Equals("MyItem") == true);
 			Assert.IsNotNull(myMyTypeElement);
+		}
+
+		[TestMethod]
+		public void CheckMessageContractHeaderTypeGeneration()
+		{
+			StartService(typeof(MessageContractService));
+			var wsdl = GetWsdl();
+			StopServer();
+
+			var root = XElement.Parse(wsdl);
+
+			var headerType = GetElements(root, _xmlSchema + "complexType").SingleOrDefault(a => a.Attribute("name")?.Value.Equals(nameof(MessageContractService.TestMessageContract)) == true);
+			var headerTypeElements = GetElements(headerType, _xmlSchema + "element");
+
+			// We should not have any header elements within the MessageContract ComplexType
+			Assert.IsFalse(headerTypeElements.Any(e => e.Attribute("name").Value.Equals(nameof(MessageContractService.TestMessageContract.ComplexHeader))));
+			Assert.IsFalse(headerTypeElements.Any(e => e.Attribute("name").Value.Equals(nameof(MessageContractService.TestMessageContract.HeaderField))));
+			Assert.AreEqual(2, headerTypeElements.Count);
+		}
+
+		[TestMethod]
+		public void CheckMessageContractHeaderMessageGeneration()
+		{
+			StartService(typeof(MessageContractService));
+			var wsdl = GetWsdl();
+			StopServer();
+
+			var root = XElement.Parse(wsdl);
+
+			var headerMessage = GetElements(root, _wsdlSchema + "message").SingleOrDefault(a => a.Attribute("name")?.Value.Equals($"{nameof(IMessageContractService)}_{nameof(IMessageContractService.Test)}_Headers") == true);
+			Assert.IsNotNull(headerMessage);
+			var headerMessageParts = GetElements(headerMessage, _wsdlSchema + "part");
+
+			// We should have header parts with names under the message node
+			Assert.IsTrue(headerMessageParts.Any(e => e.Attribute("name").Value.Equals(nameof(MessageContractService.TestMessageContract.HeaderField))));
+			Assert.IsTrue(headerMessageParts.Any(e => e.Attribute("name").Value.Equals(nameof(MessageContractService.TestMessageContract.ComplexHeader))));
+			Assert.AreEqual(2, headerMessageParts.Count);
+		}
+
+		[TestMethod]
+		public void CheckMessageContractBindingGeneration()
+		{
+			StartService(typeof(MessageContractService));
+			var wsdl = GetWsdl();
+			StopServer();
+
+			var root = XElement.Parse(wsdl);
+
+			var serviceBinding = GetElements(root, _wsdlSchema + "binding").SingleOrDefault(a => a.Attribute("type")?.Value.Equals($"tns:{nameof(IMessageContractService)}") == true);
+			Assert.IsNotNull(serviceBinding);
+			var serviceBindingOperation = GetElements(serviceBinding, _wsdlSchema + "operation").SingleOrDefault(a => a.Attribute("name")?.Value.Equals(nameof(IMessageContractService.Test)) == true);
+			Assert.IsNotNull(serviceBindingOperation);
+
+			var inputElement = GetElements(serviceBindingOperation, _wsdlSchema + "input").SingleOrDefault();
+			Assert.IsNotNull(inputElement);
+
+			// We should have 2 header inputs for the required fields
+			var inputHeaders = GetElements(inputElement, _soapSchema + "header");
+			Assert.AreEqual(2, inputHeaders.Count);
+			Assert.IsTrue(inputHeaders.Single(e => e.Attribute("part").Value.Equals(nameof(MessageContractService.TestMessageContract.HeaderField))) != null);
+			Assert.IsTrue(inputHeaders.Single(e => e.Attribute("part").Value.Equals(nameof(MessageContractService.TestMessageContract.ComplexHeader))) != null);
+
+			var outputElement = GetElements(serviceBindingOperation, _wsdlSchema + "output").SingleOrDefault();
+			Assert.IsNotNull(outputElement);
+
+			// We should have 2 header outputs for the required fields
+			var outputHeaders = GetElements(outputElement, _soapSchema + "header");
+			Assert.AreEqual(2, outputHeaders.Count);
+			Assert.IsTrue(outputHeaders.Single(e => e.Attribute("part").Value.Equals(nameof(MessageContractService.TestMessageContract.HeaderField))) != null);
+			Assert.IsTrue(outputHeaders.Single(e => e.Attribute("part").Value.Equals(nameof(MessageContractService.TestMessageContract.ComplexHeader))) != null);
+		}
+
+		[TestMethod]
+		public void CheckMessageContractWrapperName()
+		{
+			StartService(typeof(MessageContractWrapperNameService));
+			var wsdl = GetWsdl();
+			StopServer();
+
+			var root = XElement.Parse(wsdl);
+
+			// We should have an operation for test
+			var contractOperationRenamed = GetElements(root, _xmlSchema + "element").SingleOrDefault(a => a.Attribute("name")?.Value.Equals(nameof(IMessageContractWrapperNameService.Test)) == true);
+			Assert.IsNotNull(contractOperationRenamed);
+
+			// We should have an element with the name "WrapperRenamed"
+			var operationElement = GetElements(contractOperationRenamed, _xmlSchema + "element").SingleOrDefault(a => a.Attribute("name")?.Value.Equals("WrapperRenamed") == true);
+			Assert.IsNotNull(operationElement);
+
+			// We should have a type NOT using the wrapper name
+			Assert.IsFalse(operationElement.Attribute("type").Value.Equals("q1:WrapperRenamed"));
+		}
+
+		[TestMethod]
+		public void CheckMessageContractWrapperNamespace()
+		{
+			StartService(typeof(MessageContractWrapperNamespaceService));
+			var wsdl = GetWsdl();
+			StopServer();
+
+			var root = XElement.Parse(wsdl);
+
+			// We should have an operation for test
+			var contractOperationRenamed = GetElements(root, _xmlSchema + "element").SingleOrDefault(a => a.Attribute("name")?.Value.Equals(nameof(IMessageContractWrapperNamespaceService.Test)) == true);
+			Assert.IsNotNull(contractOperationRenamed);
+
+			// We should have an element called request for the test operation
+			var operationElement = GetElements(contractOperationRenamed, _xmlSchema + "element").SingleOrDefault(a => a.Attribute("name")?.Value.Equals("request") == true);
+			Assert.IsNotNull(operationElement);
+
+			// The test element should have an xlmns attribute for the wrapper namespace
+			Assert.IsTrue(operationElement.GetNamespaceOfPrefix("q1").NamespaceName.Equals(ServiceNamespace.Value));
+
+			// There should be a schema defined for the wrapper namespace
+			var wrapperSchema = GetElements(root, _xmlSchema + "schema").SingleOrDefault(a => a.Attribute("targetNamespace")?.Value.Equals(ServiceNamespace.Value) == true);
+			Assert.IsNotNull(wrapperSchema);
+		}
+
+		[TestMethod]
+		public void CheckMessageHeaderName()
+		{
+			StartService(typeof(MessageHeaderNameService));
+			var wsdl = GetWsdl();
+			StopServer();
+
+			var root = XElement.Parse(wsdl);
+
+			var headerMessage = GetElements(root, _wsdlSchema + "message").SingleOrDefault(a => a.Attribute("name")?.Value.Equals($"{nameof(IMessageHeaderNameService)}_{nameof(IMessageHeaderNameService.Test)}_Headers") == true);
+			Assert.IsNotNull(headerMessage);
+			var headerMessageParts = GetElements(headerMessage, _wsdlSchema + "part");
+
+			// We should have header part with renamed name under the message node
+			Assert.IsNotNull(headerMessageParts.SingleOrDefault(e => e.Attribute("name").Value.Equals("HeaderRenamed")));
+
+			// We should also have a binding input with the same header
+			var testBinding = GetElements(root, _wsdlSchema + "binding").SingleOrDefault();
+			Assert.IsNotNull(testBinding);
+			var testBindingOperation = GetElements(testBinding, _wsdlSchema + "operation").SingleOrDefault(a => a.Attribute("name")?.Value.Equals(nameof(IMessageHeaderNameService.Test)) == true);
+			Assert.IsNotNull(testBindingOperation);
+			var testBindingInput = GetElements(testBindingOperation, _wsdlSchema + "input").Single();
+			Assert.IsNotNull(testBindingInput);
+			Assert.IsNotNull(GetElements(testBindingInput, _soapSchema + "header").SingleOrDefault(a => a.Attribute("part")?.Value.Equals("HeaderRenamed") == true));
+		}
+
+		[TestMethod]
+		public void CheckMessageBodyMemberName()
+		{
+			StartService(typeof(MessageBodyMemberNameService));
+			var wsdl = GetWsdl();
+			StopServer();
+
+			var root = XElement.Parse(wsdl);
+
+			// We should have a complex type for the testContract
+			var testContractComplexType = GetElements(root, _xmlSchema + "complexType").SingleOrDefault(a => a.Attribute("name")?.Value.Equals(nameof(MessageBodyMemberNameService.TestContract)) == true);
+			Assert.IsNotNull(testContractComplexType);
+
+			// We should have one element named using the member body member body name
+			Assert.IsNotNull(GetElements(testContractComplexType, _xmlSchema + "element").SingleOrDefault(a => a.Attribute("name")?.Value.Equals("BodyMemberRenamed") == true));
 		}
 
 		[TestMethod]
